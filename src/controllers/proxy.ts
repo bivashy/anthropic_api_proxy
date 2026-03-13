@@ -1,105 +1,93 @@
-import { Request, Response, NextFunction } from 'express';
+import { NextFunction, Request, Response } from 'express';
 import anthropicService from '../services/anthropic';
 import logger from '../utils/logger';
 
 export const proxyRequest = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    // 提取路径和基本请求信息，用于日志记录
-    // 注意：req.path只会返回/messages部分，我们需要完整的路径，包括/v1前缀
-    const originalPath = req.path;
-    // 构建完整API路径 - 确保路径以/v1开头
-    const fullPath = `/v1${originalPath}`;
-    const method = req.method;
-    const hasApiKey = !!req.headers['x-api-key'];
+    try {
+        const originalPath = req.path;
+        const fullPath = `/v1${originalPath}`;
+        const method = req.method;
+        const hasApiKey = !!req.headers['x-api-key'];
 
-    logger.info(`处理API请求: ${method} ${fullPath}`, {
-      originalPath,
-      fullPath,
-      method,
-      hasApiKey,
-      hasAnthropicVersion: !!req.headers['anthropic-version'],
-      contentType: req.headers['content-type'],
-      bodySize: req.body ? JSON.stringify(req.body).length : 0
-    });
+        logger.info(`API: ${method} ${fullPath}`, {
+            originalPath,
+            fullPath,
+            method,
+            hasApiKey,
+            hasAnthropicVersion: !!req.headers['anthropic-version'],
+            contentType: req.headers['content-type'],
+            bodySize: req.body ? JSON.stringify(req.body).length : 0
+        });
 
-    // 调用Anthropic服务，传递完整路径
-    const response = await anthropicService.proxyRequest(
-      fullPath,
-      method,
-      req.headers,
-      req.body
-    );
+        const response = await anthropicService.proxyRequest(
+            fullPath,
+            method,
+            req.headers,
+            req.body
+        );
 
-    // 将Anthropic API的响应头转发给客户端
-    Object.entries(response.headers).forEach(([key, value]) => {
-      if (value !== undefined) {
-        res.setHeader(key, value as string);
-      }
-    });
 
-    // 将响应状态码设置为Anthropic API的状态码
-    res.status(response.status);
+        Object.entries(response.headers).forEach(([key, value]) => {
+            if (value !== undefined && key !== 'x-api-key') {
+                res.setHeader(key, value as string);
+            }
+        });
 
-    logger.info(`成功代理请求: ${method} ${fullPath}`, {
-      status: response.status,
-      originalPath,
-      fullPath,
-      method
-    });
+        res.status(response.status);
 
-    // 将Anthropic API的响应体转发给客户端
-    response.data.pipe(res);
-  } catch (error: any) {
-    // 如果Anthropic API返回错误，将错误转发给客户端
-    if (error.response) {
-      const { status, headers, data } = error.response;
+        logger.info(`Pre sending request: ${method} ${fullPath}`, {
+            status: response.status,
+            originalPath,
+            fullPath,
+            method
+        });
 
-      logger.warn(`Anthropic API返回错误状态码: ${status}`, {
-        status,
-        path: req.path,
-        fullPath: `/v1${req.path}`,
-        method: req.method
-      });
+        response.data.pipe(res);
+    } catch (error: any) {
+        if (error.response) {
+            const { status, headers, data } = error.response;
 
-      // 设置响应头
-      Object.entries(headers).forEach(([key, value]) => {
-        if (value !== undefined) {
-          res.setHeader(key, value as string);
+            logger.warn(`Anthropic API返回错误状态码: ${status}`, {
+                status,
+                path: req.path,
+                fullPath: `/v1${req.path}`,
+                method: req.method
+            });
+
+            Object.entries(headers).forEach(([key, value]) => {
+                if (value !== undefined) {
+                    res.setHeader(key, value as string);
+                }
+            });
+
+            res.status(status);
+
+            if (data && typeof data.pipe === 'function') {
+                data.pipe(res);
+            } else {
+                res.json(data);
+            }
+        } else {
+            const errorDetails = {
+                path: req.path,
+                fullPath: `/v1${req.path}`,
+                method: req.method,
+                errorName: error.name || '未知错误',
+                errorMessage: error.message || '未提供错误消息',
+                stack: error.stack
+            };
+
+            logger.error('代理请求时发生错误:', errorDetails);
+
+            const enhancedError = new Error(`代理请求失败: ${error.message}`);
+            (enhancedError as any).originalError = error;
+            (enhancedError as any).requestInfo = {
+                path: req.path,
+                fullPath: `/v1${req.path}`,
+                method: req.method
+            };
+
+            next(enhancedError);
         }
-      });
-
-      // 设置状态码并返回错误数据
-      res.status(status);
-
-      // 如果响应是流，则转发流
-      if (data && typeof data.pipe === 'function') {
-        data.pipe(res);
-      } else {
-        res.json(data);
-      }
-    } else {
-      // 对于网络错误等，记录详细错误并传递给错误处理中间件
-      const errorDetails = {
-        path: req.path,
-        fullPath: `/v1${req.path}`,
-        method: req.method,
-        errorName: error.name || '未知错误',
-        errorMessage: error.message || '未提供错误消息',
-        stack: error.stack
-      };
-
-      logger.error('代理请求时发生错误:', errorDetails);
-
-      // 创建新的错误对象，包含更多信息
-      const enhancedError = new Error(`代理请求失败: ${error.message}`);
-      (enhancedError as any).originalError = error;
-      (enhancedError as any).requestInfo = {
-        path: req.path,
-        fullPath: `/v1${req.path}`,
-        method: req.method
-      };
-
-      next(enhancedError);
     }
-  }
 };
